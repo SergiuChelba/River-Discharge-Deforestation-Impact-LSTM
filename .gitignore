@@ -1,0 +1,25 @@
+# --- Python ---
+__pycache__/
+*.py[cod]
+*$py.class
+venv/
+env/
+.env
+
+# --- VS Code (Setările tale personale nu au ce căuta pe Git public) ---
+.vscode/
+
+# --- Date (NU urcăm CSV-uri de sute de MB pe GitHub!) ---
+data/raw/*
+data/processed/*
+!data/raw/.gitkeep    # (Truc: păstrăm folderul, dar nu conținutul)
+!data/processed/.gitkeep
+
+# --- Modele antrenate (Sunt mari și binare) ---
+*.h5
+*.keras
+models/*
+!models/.gitkeep
+
+# --- Jupyter Notebook checkpoints ---
+.ipynb_checkpoints
