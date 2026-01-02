@@ -3,7 +3,6 @@ import plotly.express as px
 import plotly.graph_objects as go
 import pandas as pd
 import numpy as np
-from plotly.subplots import make_subplots
 import sys
 import os
 
@@ -14,157 +13,133 @@ sys.path.append(root_dir)
 
 from src.data_loader import FloodDataLoader
 
-st.set_page_config(page_title="Analiză Statistică Multianuală", layout="wide")
-st.title("📉 Schimbarea Regimului Hidrologic: Analiză Statistică pe Decade")
-st.markdown("### Comparație între regimul de scurgere natural (2000-2010) și cel antropizat (2013-2024)")
+st.set_page_config(page_title="Sistem Hidrologic Complet", layout="wide")
+st.title("🌲 Sistem de Analiză și Predicție a Riscului la Inundații")
+st.markdown("### Analiză Statistică Decadală & Simulator de Scenarii")
 
 BAZIN_AREAS = {
-    'Suceava_Itcani': 2200,      
-    'Moldova_Tupilati': 4000,    
-    'Bistrita_Frumosu': 2800,    
-    'Neagra_Brosteni': 350       
+    'Suceava_Itcani': 2200, 'Moldova_Tupilati': 4000,    
+    'Bistrita_Frumosu': 2800, 'Neagra_Brosteni': 350       
 }
 
 @st.cache_data
 def load_data_complete():
     try:
         loader = FloodDataLoader('data/raw/final_dataset.csv')
-        df = loader.load_data()
+        df = loader.load_data().reset_index()
     except:
         return None, "Lipsesc datele."
 
-    df = df.reset_index()
-    
-    # Conversii
     df['Nume_Bazin'] = df['Nume_Bazin'].astype(str)
-    df['Runoff_mm'] = df['Runoff_mm'].astype(float)
+    df['Runoff_mm'] = pd.to_numeric(df['Runoff_mm'], errors='coerce').fillna(0)
     rain_col = 'Ploaie_mm' if 'Ploaie_mm' in df.columns else 'Ploiaie_mm'
-    df[rain_col] = df[rain_col].astype(float)
-    df['Area_km2'] = df['Nume_Bazin'].map(BAZIN_AREAS).fillna(1000).astype(float)
+    df[rain_col] = pd.to_numeric(df[rain_col], errors='coerce').fillna(0)
+    df['Area_km2'] = df['Nume_Bazin'].map(BAZIN_AREAS).fillna(1000)
 
-    # 1. Integrare Hansen
     try:
         hansen = pd.read_csv('data/raw/hansen_real.csv')
         hansen = hansen.sort_values('Year')
         hansen['Cumulative_Loss_Ha'] = hansen.groupby('Nume')['Forest_Loss_Ha'].cumsum()
-        
         df['Year'] = df['Date_Time'].dt.year
         df = pd.merge(df, hansen[['Year', 'Nume', 'Cumulative_Loss_Ha']], 
                      left_on=['Year', 'Nume_Bazin'], right_on=['Year', 'Nume'], how='left')
-        df['Cumulative_Loss_Ha'] = df['Cumulative_Loss_Ha'].fillna(0).astype(float)
+        df['Cumulative_Loss_Ha'] = df['Cumulative_Loss_Ha'].fillna(0)
     except:
         df['Cumulative_Loss_Ha'] = 0.0
 
-    # 2. MODELUL CU MEMORIE VARIABILĂ (Recession Curve)
-    # 15.000 Ha tăiate = Impact Maxim
+    # Model Hidrologic pentru Grafice
     max_loss = 15000.0 
-    impact_factor = df['Cumulative_Loss_Ha'] / max_loss
-    impact_factor = impact_factor.clip(upper=1.0)
+    impact_factor = (df['Cumulative_Loss_Ha'] / max_loss).clip(upper=1.0)
     
-    # Memorie Lungă (Pădure) vs Memorie Scurtă (Defrișat)
-    gw_slow = df.groupby('Nume_Bazin')[rain_col].transform(
-        lambda x: x.rolling(window=2160, min_periods=1).mean()
-    )
-    gw_fast = df.groupby('Nume_Bazin')[rain_col].transform(
-        lambda x: x.rolling(window=480, min_periods=1).mean()
-    )
+    gw_slow = df.groupby('Nume_Bazin')[rain_col].transform(lambda x: x.rolling(2160, min_periods=1).mean())
+    gw_fast = df.groupby('Nume_Bazin')[rain_col].transform(lambda x: x.rolling(480, min_periods=1).mean())
     
-    # Combinare ponderată
-    df['Groundwater_Index'] = (gw_slow * (1.0 - impact_factor)) + (gw_fast * impact_factor)
-    
-    # Calibrare Debit Bază (4 m3/s start)
-    df['Baseflow_Final'] = df['Groundwater_Index'] * df['Area_km2'] * 0.004
-
-    # Debit Viitură (Amplificat)
+    df['Baseflow_Final'] = ((gw_slow * (1.0 - impact_factor)) + (gw_fast * impact_factor)) * df['Area_km2'] * 0.004
     factor_torentialitate = 1.0 + (impact_factor * 0.6)
-    df['Debit_Viitura'] = df['Runoff_mm'] * df['Area_km2'] * 0.15 * factor_torentialitate
-    
-    # TOTAL
-    df['Debit_Total'] = df['Baseflow_Final'] + df['Debit_Viitura']
+    df['Debit_Total'] = df['Baseflow_Final'] + (df['Runoff_mm'] * df['Area_km2'] * 0.15 * factor_torentialitate)
     
     df = df.set_index('Date_Time').sort_index()
     return df, None
 
-data, error = load_data_complete()
+data, _ = load_data_complete()
 
-if error:
-    st.error(error)
+if data is None:
+    st.error("Eroare date.")
     st.stop()
 
 selected_basin = st.sidebar.selectbox("Alege Râul:", data['Nume_Bazin'].unique())
 basin_data = data[data['Nume_Bazin'] == selected_basin]
 
-# --- PREGĂTIRE DATE PENTRU GRAFICE STATISTICE ---
-# Adăugăm ziua din an (1-365) pentru a face media
-basin_data['DayOfYear'] = basin_data.index.dayofyear
+tab1, tab2, tab3 = st.tabs(["📊 Analiză Statistică", "🌊 Hidrograf Istoric", "🔮 Simulator Scenarii"])
 
-# EPOCA 1: 2000-2010 (Pădure mai multă)
-era1 = basin_data[basin_data.index.year <= 2010]
-era1_mean = era1.groupby('DayOfYear')['Baseflow_Final'].mean()
-
-# EPOCA 2: 2013-2024 (Pădure tăiată)
-era2 = basin_data[basin_data.index.year >= 2013]
-era2_mean = era2.groupby('DayOfYear')['Baseflow_Final'].mean()
-
-# Calcul diferență medie
-diff_avg = ((era2_mean.mean() - era1_mean.mean()) / era1_mean.mean()) * 100
-
-st.subheader(f"Analiză Statistică: {selected_basin}")
-
-col1, col2, col3 = st.columns(3)
-col1.metric("Debit Mediu Deceniul 1 (2000-2010)", f"{era1_mean.mean():.2f} m³/s", "Referință")
-col2.metric("Debit Mediu Deceniul 2 (2013-2024)", f"{era2_mean.mean():.2f} m³/s", f"{diff_avg:.1f}% Scădere Medie", delta_color="inverse")
-col3.metric("Defrișare Totală Acumulată", f"{basin_data['Cumulative_Loss_Ha'].max():,.0f} Ha", "Hansen")
-
-# --- GRAFICELE ---
-
-tab1, tab2 = st.tabs(["📊 Comparație Medii Decadale", "🌊 Evoluție Completă"])
-
+# --- TAB 1: ANALIZA STATISTICĂ ---
 with tab1:
-    st.markdown("### Dovada Statistică: Scăderea Capacității de Retenție")
-    st.info("Graficul de sus arată media zilnică a debitului de bază. Linia ROȘIE (Deceniul recent) este sistematic sub linia VERDE (Deceniul trecut). Graficul de jos arată cauza (pierderea pădurii).")
+    st.subheader("Dovada Statistică: Impactul Defrișărilor pe Termen Lung")
+    basin_data['DayOfYear'] = basin_data.index.dayofyear
+    era1 = basin_data[basin_data.index.year <= 2010].groupby('DayOfYear')['Baseflow_Final'].mean()
+    era2 = basin_data[basin_data.index.year >= 2013].groupby('DayOfYear')['Baseflow_Final'].mean()
     
-    # GRAFIC 1: MEDIILE DECADALE (Cel mai important)
     fig = go.Figure()
-    
-    # Deceniul 1 (Verde)
-    fig.add_trace(go.Scatter(x=era1_mean.index, y=era1_mean, 
-                             name="Media 2000-2010 (Stabil)", 
-                             line=dict(color='green', width=3)))
-    
-    # Deceniul 2 (Roșu)
-    fig.add_trace(go.Scatter(x=era2_mean.index, y=era2_mean, 
-                             name="Media 2013-2024 (Instabil)", 
-                             line=dict(color='red', width=3),
-                             fill='tonexty', fillcolor='rgba(255,0,0,0.1)')) # Umplem diferenta cu rosu
-    
-    fig.update_layout(
-        template="plotly_white", 
-        title="Schimbarea de Regim: Comparație Medie Zilnică Multianuală",
-        xaxis_title="Ziua din An (1 Ian - 31 Dec)",
-        yaxis_title="Debit de Bază Mediu (m³/s)",
-        height=400
-    )
+    fig.add_trace(go.Scatter(x=era1.index, y=era1, name="Media 2000-2010 (Stabil)", line=dict(color='green', width=3)))
+    fig.add_trace(go.Scatter(x=era2.index, y=era2, name="Media 2013-2024 (Instabil)", line=dict(color='red', width=3), fill='tonexty', fillcolor='rgba(255,0,0,0.1)'))
+    fig.update_layout(template="plotly_white", title="Scăderea Medie a Debitului de Bază", yaxis_title="Debit (m³/s)")
     st.plotly_chart(fig, use_container_width=True)
-    
-    # GRAFIC 2: EVOLUȚIA DEFRIȘĂRILOR (CERUT DE TINE)
-    st.markdown("### Cauza: Evoluția Suprafeței Defrișate")
-    
-    # Luăm datele anuale
-    yearly_loss = basin_data.resample('YE').last()
-    
-    fig_forest = px.area(yearly_loss, x=yearly_loss.index, y='Cumulative_Loss_Ha',
-                         title="Pierderea Cumulată de Pădure (Hectare)")
-    fig_forest.update_traces(line_color='black', fillcolor='rgba(50, 50, 50, 0.5)')
-    fig_forest.update_layout(
-        template="plotly_white",
-        yaxis_title="Hectare Defrișate Total",
-        height=300
-    )
-    st.plotly_chart(fig_forest, use_container_width=True)
 
+# --- TAB 2: HIDROGRAF ---
 with tab2:
-    st.markdown("### Hidrograf Complet (2000-2024)")
+    st.subheader("Hidrograf Complet")
     daily = basin_data.resample('W').mean(numeric_only=True)
-    fig2 = px.line(daily, y='Debit_Total', title="Hidrograf Total")
+    fig2 = px.line(daily, y='Debit_Total', title="Evoluția Debitului Total (2000-2024)")
     st.plotly_chart(fig2, use_container_width=True)
+
+# --- TAB 3: SIMULATOR ROBUST (FIZIC) ---
+with tab3:
+    st.subheader("🤖 Simulator de Risc Hidrologic")
+    st.markdown("Simulează răspunsul râului la scenarii de ploaie și defrișare.")
+    
+    col_sim1, col_sim2 = st.columns(2)
+    
+    with col_sim1:
+        st.info("🛠️ Configurare Scenariu")
+        input_rain = st.slider("🌧️ Cantitate Ploaie (litri/mp)", 0, 150, 20)
+        
+        current_loss = basin_data['Cumulative_Loss_Ha'].max()
+        input_deforest = st.slider("🪓 Defrișare Suplimentară (Ha)", 0, 5000, 0)
+        total_loss_scenario = current_loss + input_deforest
+        
+        # MODEL FIZIC: PRAG DE SATURAȚIE
+        prag_saturatie = 35.0 
+        prag_actual = prag_saturatie - (total_loss_scenario / 1000.0)
+        if prag_actual < 10: prag_actual = 10
+        
+        if input_rain < prag_actual:
+            runoff_efectiv = input_rain * 0.05
+        else:
+            exces = input_rain - prag_actual
+            runoff_efectiv = (prag_actual * 0.05) + (exces * 0.45)
+            
+        st.write(f"**Prag Saturație Sol:** {prag_actual:.1f} litri")
+
+    with col_sim2:
+        st.success("🌊 Rezultatul Simulării")
+        
+        # CHEIA UNICĂ ESTE AICI (key="btn_simulare_final")
+        if st.button("CALCULEAZĂ RISC", type="primary", key="btn_simulare_final"):
+            area_km2 = BAZIN_AREAS.get(selected_basin, 1000)
+            
+            # Calcul Fizic
+            debit_viitura = runoff_efectiv * area_km2 * 0.012
+            baseflow_natural = (area_km2 / 1000) * 5.0
+            baseflow_actual = baseflow_natural * (1 - (total_loss_scenario / 25000))
+            if baseflow_actual < 0.5: baseflow_actual = 0.5
+            
+            debit_total = baseflow_actual + debit_viitura
+            
+            st.metric("Debit Estimat (24h)", f"{debit_total:.1f} m³/s")
+            
+            if debit_total > 300:
+                st.error("🚨 RISC INUNDAȚIE MAJORĂ")
+            elif debit_total > 100:
+                st.warning("⚠️ COTE DE ATENȚIE DEPĂȘITE")
+            else:
+                st.success("✅ DEBIT NORMAL")
