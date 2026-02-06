@@ -51,37 +51,39 @@ BAZIN_AREAS = {k: v['area_km2'] for k, v in BASIN_CONFIG.items()}
 BASEFLOW = {k: v['baseflow'] for k, v in BASIN_CONFIG.items()}
 
 # --- 3. TRANSFORMARE FIZICĂ: METODA RAȚIONALĂ (Hidrologie Clasică) ---
+
+
 def calculate_runoff_coefficient(rainfall_mm):
     """
     Calculează Coeficientul de Scurgere bazat pe intensitatea ploii.
-    
+
     Principiu Hidrologic:
     - Ploi mici: Solul absoarbe mult → C mic (0.1-0.3)
     - Ploi moderate: Saturație parțială → C mediu (0.4-0.6)
     - Ploi torențiale: Saturație totală → C mare (0.7-0.95)
-    
+
     Formula empirică (validată în literature):
     C = C_min + (C_max - C_min) * (1 - exp(-k * Rain))
-    
+
     Unde k controlează rata de saturație (bazat pe tip sol montan)
     """
     C_min = 0.15  # Coeficient minim (sol uscat, infiltrare maximă)
     C_max = 0.90  # Coeficient maxim (sol saturat, aproape tot devine runoff)
     k = 0.08      # Rata de saturație (calibrată pentru bazine montane)
-    
+
     # Formula exponențială (creștere naturală spre saturație)
     C = C_min + (C_max - C_min) * (1 - np.exp(-k * rainfall_mm))
-    
+
     return C
 
 
 def calculate_time_of_concentration(area_km2):
     """
     Calculează timpul de concentrare (minute) - timpul în care apa ajunge la exutoriu.
-    
+
     Formula Kirpich (clasică în hidrologie):
     Tc = 0.0195 * L^0.77 * S^-0.385
-    
+
     Pentru simplificare, folosim relația empirică cu aria:
     Bazine mici → Tc mic → Răspuns rapid (vârf mare)
     Bazine mari → Tc mare → Răspuns lent (vârf mai mic)
@@ -89,7 +91,7 @@ def calculate_time_of_concentration(area_km2):
     # Aproximare: Tc ~ sqrt(Area) pentru bazine montane
     # Bazine mici (350 km²) → Tc ~ 30-60 min (flashy!)
     # Bazine mari (4000 km²) → Tc ~ 180-360 min (lent)
-    
+
     Tc_hours = 0.5 * np.sqrt(area_km2) / 10.0  # Formula empirică
     return max(0.5, min(Tc_hours, 6.0))  # Limitat între 0.5-6h
 
@@ -97,29 +99,29 @@ def calculate_time_of_concentration(area_km2):
 def transform_mean_to_peak(rainfall_mm, area_km2, discharge_mean):
     """
     Transformă debitul MEDIU (din LSTM/satelit) în debit de VÂRF.
-    
+
     Bazat pe METODA RAȚIONALĂ și teoria hidrogramului unitar.
-    
+
     Logica:
     1. Calculăm Runoff Coefficient (C) bazat pe intensitate
     2. Calculăm factorul de concentrare bazat pe dimensiunea bazinului
     3. Aplicăm formula: Q_peak = Q_mean * Peak_Factor
-    
+
     Peak_Factor depinde de:
     - Intensitatea ploii (mai multă ploaie → vârf mai pronunțat)
     - Dimensiunea bazinului (bazine mici → vârf foarte ascuțit)
     """
-    
+
     if rainfall_mm <= 0:
         return discharge_mean  # Fără ploaie, nu există amplificare
-    
+
     # 1. Coeficient de scurgere (crește cu intensitatea)
     C = calculate_runoff_coefficient(rainfall_mm)
-    
+
     # 2. Factor bazat pe dimensiunea bazinului
     # Bazine mici → Factor mare (concentrare rapidă)
     # Bazine mari → Factor mic (dispersie, atenuare)
-    
+
     if area_km2 < 500:
         # Bazine FOARTE MICI (Neagra): Flash flood
         size_factor = 3.5
@@ -132,18 +134,18 @@ def transform_mean_to_peak(rainfall_mm, area_km2, discharge_mean):
     else:
         # Bazine MARI (Moldova)
         size_factor = 1.6
-    
+
     # 3. Factor bazat pe intensitatea ploii (transformare medie → vârf)
     # La ploi mari, hidrogramul are un vârf foarte pronunțat
     intensity_factor = 1.0 + (C * 2.0)  # Relație liniară cu C
-    
+
     # 4. FORMULA FINALĂ
     peak_factor = size_factor * intensity_factor
-    
+
     # Limitare realistă (să nu explodeze)
     peak_factor = min(peak_factor, 12.0)
     peak_factor = max(peak_factor, 1.0)
-    
+
     return discharge_mean * peak_factor
 
 # --- 4. MODEL LOADING ---
@@ -512,29 +514,32 @@ with tab3:
 
 # 4. PREDICȚIE LSTM (Debitul MEDIU învățat din date)
                 pred_scaled = model.predict(input_tensor, verbose=0)
-                pred_discharge_mean = scaler_y.inverse_transform(pred_scaled)[0][0]
-                
+                pred_discharge_mean = scaler_y.inverse_transform(pred_scaled)[
+                    0][0]
+
                 # Asigurare valoare pozitivă
                 pred_discharge_mean = max(0, pred_discharge_mean)
-                
+
                 # 5. TRANSFORMARE FIZICĂ: Medie → Vârf (METODA RAȚIONALĂ)
                 # Satelitul vede MEDIE, dar viiturile au VÂRFURI!
                 pred_discharge_peak = transform_mean_to_peak(
-                    rain_input, 
+                    rain_input,
                     basin_config.get('area_km2', 1000),
                     pred_discharge_mean
                 )
-                
+
                 # 6. Adaugă baseflow (componentă subterană permanentă)
                 total_discharge = pred_discharge_peak + base_flow_current
-                
+
                 # Calcule pentru afișare
-                peak_factor = pred_discharge_peak / pred_discharge_mean if pred_discharge_mean > 0 else 1.0
+                peak_factor = pred_discharge_peak / \
+                    pred_discharge_mean if pred_discharge_mean > 0 else 1.0
                 runoff_coef = calculate_runoff_coefficient(rain_input)
 
                 # ==== AFIȘARE REZULTATE ====
-                st.success(f"### 🎯 Debit de Vârf: **{total_discharge:.1f} m³/s**")
-                
+                st.success(
+                    f"### 🎯 Debit de Vârf: **{total_discharge:.1f} m³/s**")
+
                 col_m1, col_m2, col_m3 = st.columns(3)
                 with col_m1:
                     st.metric(
@@ -554,7 +559,7 @@ with tab3:
                         f"{base_flow_current:.1f} m³/s",
                         help="Contribuție subterană"
                     )
-                
+
                 # Explicație formulă
                 st.info(f"""
                 **🔬 Calcul Științific (Metoda Rațională):**  
